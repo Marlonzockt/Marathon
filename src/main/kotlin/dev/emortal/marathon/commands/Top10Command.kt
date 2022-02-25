@@ -2,7 +2,6 @@ package dev.emortal.marathon.commands
 
 import dev.emortal.acquaintance.AcquaintanceExtension
 import dev.emortal.marathon.MarathonExtension
-import dev.emortal.marathon.db.MySQLStorage
 import dev.emortal.marathon.game.MarathonGame
 import dev.emortal.marathon.utils.armify
 import net.kyori.adventure.text.Component
