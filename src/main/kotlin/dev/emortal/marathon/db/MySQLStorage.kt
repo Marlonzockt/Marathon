@@ -3,126 +3,113 @@ package dev.emortal.marathon.db
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
 import dev.emortal.marathon.MarathonExtension
+import dev.emortal.marathon.TimeFrame
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import java.io.ByteArrayInputStream
-import java.io.IOException
 import java.io.InputStream
 import java.net.URLEncoder
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
+import java.sql.PreparedStatement
+import java.sql.Types
 import java.util.*
 
 
 class MySQLStorage : Storage() {
 
     init {
-        val conn = getConnection()
-        val statement =
-            conn.prepareStatement("CREATE TABLE IF NOT EXISTS marathon (`player` BINARY(16), `highscore` INT, `time` BIGINT)")
-        statement.executeUpdate()
-        statement.close()
-        conn.close()
+        prepareStatement(
+            "CREATE TABLE IF NOT EXISTS marathon (`player` BINARY(16), `highscore` INT, `time` BIGINT, `time_frame` VARCHAR(127))",
+            PreparedStatement::executeUpdate
+        )
     }
 
     fun drop() {
-        val conn = getConnection()
-        val statement =
-            conn.prepareStatement("DROP TABLE marathon")
-        statement.executeUpdate()
-        statement.close()
-        conn.close()
+        prepareStatement("DROP TABLE marathon", PreparedStatement::executeUpdate)
     }
 
-    override fun setHighscore(player: UUID, highscore: Highscore): Unit = runBlocking {
-        launch {
-            val conn = getConnection()
+    override fun setHighscore(player: UUID, highscore: Highscore, timeFrame: TimeFrame?) {
+        runBlocking {
+            launch {
+                prepareStatement("DELETE FROM marathon WHERE player=? AND time_frame=?") { statement ->
+                    statement.setBinaryStream(1, player.toInputStream())
+                    statement.setTimeFrame(2, timeFrame)
 
-            val statement = conn.prepareStatement("DELETE FROM marathon WHERE player=?")
+                    statement.executeUpdate()
+                }
 
-            statement.setBinaryStream(1, player.toInputStream())
-            statement.executeUpdate()
-            statement.close()
+                prepareStatement("INSERT INTO marathon VALUES(?, ?, ?, ?)") { statement ->
+                    statement.setBinaryStream(1, player.toInputStream())
+                    statement.setInt(2, highscore.score)
+                    statement.setLong(3, highscore.time)
+                    statement.setTimeFrame(4, timeFrame)
 
-            val statement2 = conn.prepareStatement("INSERT INTO marathon VALUES(?, ?, ?)")
-
-            statement2.setBinaryStream(1, player.toInputStream())
-            statement2.setInt(2, highscore.score)
-            statement2.setLong(3, highscore.time)
-
-            statement2.executeUpdate()
-            statement2.close()
-
-            conn.close()
+                    statement.executeUpdate()
+                }
+            }
         }
     }
 
-    override suspend fun getHighscoreAsync(player: UUID): Highscore? = coroutineScope {
+    override suspend fun getHighscoreAsync(player: UUID, timeFrame: TimeFrame?): Highscore? = coroutineScope {
         return@coroutineScope async {
-            val conn = getConnection()
-            val statement = conn.prepareStatement("SELECT highscore, time FROM marathon WHERE player=?")
-            statement.setBinaryStream(1, player.toInputStream())
+            val results = prepareStatement("SELECT highscore, time FROM marathon WHERE player=? AND time_frame=?") { statement ->
+                statement.setBinaryStream(1, player.toInputStream())
+                statement.setTimeFrame(2, timeFrame)
 
-            val results = statement.executeQuery()
-
-            var highscore: Int? = null
-            var time: Long? = null
-            if (results.next()) {
-                highscore = results.getInt(1)
-                time = results.getLong(2)
+                statement.executeQuery()
             }
-            statement.close()
-            results.close()
-            conn.close()
 
-            if (highscore == null || time == null) return@async null
+            results.use {
+                var highscore: Int? = null
+                var time: Long? = null
+                if (results.next()) {
+                    highscore = results.getInt(1)
+                    time = results.getLong(2)
+                }
 
-            return@async Highscore(highscore, time)
+                if (highscore == null || time == null) return@async null
+
+                return@async Highscore(highscore, time)
+            }
         }.await()
     }
 
-    override suspend fun getTopHighscoresAsync(highscoreCount: Int): Map<UUID, Highscore> = coroutineScope {
+    override suspend fun getTopHighscoresAsync(highscoreCount: Int, timeFrame: TimeFrame?): Map<UUID, Highscore> = coroutineScope {
         return@coroutineScope async {
-            val conn = getConnection()
-            val statement = conn.prepareStatement("SELECT * FROM marathon ORDER BY highscore DESC, time ASC LIMIT $highscoreCount")
-
-            val map = mutableMapOf<UUID, Highscore>()
-            val results = statement.executeQuery()
-            while (results.next()) {
-                val uuid = results.getBinaryStream("player").toUUID()
-                val score = results.getInt("highscore")
-                val time = results.getLong("time")
-
-                //println("${uuid.} - $score")
-
-                map[uuid] = Highscore(score, time)
+            val results = prepareStatement("SELECT * FROM marathon ORDER BY highscore DESC, time ASC WHERE time_frame=? LIMIT $highscoreCount") {
+                it.setTimeFrame(1, timeFrame)
+                return@prepareStatement it.executeQuery()
             }
 
-            results.close()
-            statement.close()
-            conn.close()
+            results.use {
+                val map = mutableMapOf<UUID, Highscore>()
+                while (it.next()) {
+                    val uuid = it.getBinaryStream("player").toUUID()
+                    val score = it.getInt("highscore")
+                    val time = it.getLong("time")
 
-            return@async map
+                    map[uuid] = Highscore(score, time)
+                }
+
+                return@async map
+            }
         }.await()
     }
 
-    override suspend fun getPlacementAsync(score: Int): Int? = coroutineScope {
+    override suspend fun getPlacementAsync(score: Int, timeFrame: TimeFrame?): Int? = coroutineScope {
         return@coroutineScope async {
-            val conn = getConnection()
-            val statement = conn.prepareStatement("SELECT COUNT(DISTINCT player) + 1 AS total FROM marathon WHERE highscore > ${score}")
-
-            var result: Int? = null
-            val results = statement.executeQuery()
-            if (results.next()) {
-                result = results.getInt("total")
+            return@async prepareStatement("SELECT COUNT(DISTINCT player) + 1 AS total FROM marathon WHERE highscore > ? AND time_frame = ?") {
+                it.setInt(1, score)
+                it.setTimeFrame(2, timeFrame)
+                it.executeQuery().use { results ->
+                    if (results.next()) {
+                        return@prepareStatement results.getInt("total")
+                    }
+                    return@prepareStatement null
+                }
             }
-
-            statement.close()
-            conn.close()
-
-            return@async result
         }.await()
     }
 
@@ -141,6 +128,14 @@ class MySQLStorage : Storage() {
 
         val hikariSource = HikariDataSource(hikariConfig)
         return hikariSource
+    }
+
+    private fun PreparedStatement.setTimeFrame(parameterIndex: Int, timeFrame: TimeFrame?) {
+        if (timeFrame == null) {
+            setNull(parameterIndex, Types.VARCHAR)
+        } else {
+            setString(parameterIndex, timeFrame.name)
+        }
     }
 
     fun UUID.toInputStream(): InputStream {
